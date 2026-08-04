@@ -403,6 +403,14 @@ export function calculateEstimates(
     visitedRecipes: [...new Set([...dependencies.flatMap((estimate) => estimate?.candidates.flatMap((candidate) => candidate.visitedRecipes ?? []) ?? []), recipeId])],
   });
 
+  const provisionalDetails = (dependencies: Array<Estimate | undefined>, directlyMissing: string[]) => ({
+    provisional: directlyMissing.length > 0 || dependencies.some((estimate) => estimate?.provisional),
+    missingByproducts: [...new Set([
+      ...directlyMissing,
+      ...dependencies.flatMap((estimate) => estimate?.missingByproducts ?? []),
+    ])],
+  });
+
   const effectiveSeconds = (recipe: Recipe) => {
     const speedBonus = (recipe.speedSkills ?? []).reduce((total, skill) => {
       const level = Math.max(0, skillLevels[skill.id] ?? 0);
@@ -443,8 +451,9 @@ export function calculateEstimates(
         let creditLow = 0;
         let creditHigh = 0;
         const missingByproducts: string[] = [];
-        for (const byproduct of recipe.byproducts) {
-          const estimate = filteredEstimate(estimates, byproduct.name, recipe.output, recipe.id);
+        const byproductEstimates = recipe.byproducts.map((byproduct) => filteredEstimate(estimates, byproduct.name, recipe.output, recipe.id));
+        recipe.byproducts.forEach((byproduct, index) => {
+          const estimate = byproductEstimates[index];
           const expectedQty = byproduct.qty * (byproduct.chance / 100);
           if (estimate) {
             creditLow += estimate.low * expectedQty * calculationRules.byproductCreditMultiplier;
@@ -452,15 +461,15 @@ export function calculateEstimates(
           } else {
             missingByproducts.push(byproduct.name);
           }
-        }
-        const path = provenance([...inputEstimates, ...recipe.byproducts.map((byproduct) => filteredEstimate(estimates, byproduct.name, recipe.output, recipe.id))], recipe.output, recipe.id);
+        });
+        const dependencies = [...inputEstimates, ...byproductEstimates];
+        const path = provenance(dependencies, recipe.output, recipe.id);
         put(recipe.output, `forward:${recipe.id}`, {
           low: (inputLow + operatingCost - creditHigh) / recipe.outputQty,
           high: (inputHigh + operatingCost - creditLow) / recipe.outputQty,
           label: `Produced at ${recipe.station}`,
           recipeId: recipe.id,
-          provisional: missingByproducts.length > 0 || inputEstimates.some((estimate) => estimate.provisional),
-          missingByproducts,
+          ...provisionalDetails(dependencies, missingByproducts),
           direction: "forward",
           ...path,
         });
@@ -474,19 +483,22 @@ export function calculateEstimates(
           const target = unresolved[0];
           let knownLow = 0;
           let knownHigh = 0;
+          const knownInputEstimates: Estimate[] = [];
           for (const ingredient of recipe.ingredients) {
             if (ingredient.name === target.name) continue;
             const estimate = filteredEstimate(estimates, ingredient.name, target.name, recipe.id);
             if (estimate) {
               knownLow += estimate.low * ingredient.qty;
               knownHigh += estimate.high * ingredient.qty;
+              knownInputEstimates.push(estimate);
             }
           }
           let creditLow = 0;
           let creditHigh = 0;
           const missingByproducts: string[] = [];
-          for (const byproduct of recipe.byproducts) {
-            const estimate = filteredEstimate(estimates, byproduct.name, target.name, recipe.id);
+          const byproductEstimates = recipe.byproducts.map((byproduct) => filteredEstimate(estimates, byproduct.name, target.name, recipe.id));
+          recipe.byproducts.forEach((byproduct, index) => {
+            const estimate = byproductEstimates[index];
             const expectedQty = byproduct.qty * (byproduct.chance / 100);
             if (estimate) {
               creditLow += estimate.low * expectedQty * calculationRules.byproductCreditMultiplier;
@@ -494,19 +506,15 @@ export function calculateEstimates(
             } else {
               missingByproducts.push(byproduct.name);
             }
-          }
-          const path = provenance([
-            outputEstimate,
-            ...recipe.ingredients.filter((ingredient) => ingredient.name !== target.name).map((ingredient) => filteredEstimate(estimates, ingredient.name, target.name, recipe.id)),
-            ...recipe.byproducts.map((byproduct) => filteredEstimate(estimates, byproduct.name, target.name, recipe.id)),
-          ], target.name, recipe.id);
+          });
+          const dependencies = [outputEstimate, ...knownInputEstimates, ...byproductEstimates];
+          const path = provenance(dependencies, target.name, recipe.id);
           put(target.name, `backward:${recipe.id}`, {
             low: (outputEstimate.low * recipe.outputQty - knownHigh - operatingCost + creditLow) / target.qty,
             high: (outputEstimate.high * recipe.outputQty - knownLow - operatingCost + creditHigh) / target.qty,
             label: `Back-solved from ${recipe.output}`,
             recipeId: recipe.id,
-            provisional: outputEstimate.provisional || missingByproducts.length > 0,
-            missingByproducts,
+            ...provisionalDetails(dependencies, missingByproducts),
             direction: "backward",
             ...path,
           });

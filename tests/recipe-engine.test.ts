@@ -124,6 +124,35 @@ test("subtracts known by-product value and flags unknown credit", () => {
   assert.deepEqual(unknown.estimates.Main.missingByproducts, ["Credit"]);
 });
 
+test("carries unresolved by-product names through upstream estimates", () => {
+  const items: Item[] = [
+    { name: "Raw", recipes: [] },
+    { name: "Unknown Credit", recipes: [] },
+    { name: "Intermediate", recipes: [{
+      id: "intermediate-1",
+      output: "Intermediate",
+      outputQty: 1,
+      station: "Processor",
+      manualSeconds: 0,
+      ingredients: [{ name: "Raw", qty: 1 }],
+      byproducts: [{ name: "Unknown Credit", qty: 1, chance: 100 }],
+    }] },
+    { name: "Finished", recipes: [{
+      id: "finished-1",
+      output: "Finished",
+      outputQty: 1,
+      station: "Assembler",
+      manualSeconds: 0,
+      ingredients: [{ name: "Intermediate", qty: 1 }],
+      byproducts: [],
+    }] },
+  ];
+
+  const result = calculateEstimates(items, { Raw: 10 }, null);
+  assert.equal(result.estimates.Finished.provisional, true);
+  assert.deepEqual(result.estimates.Finished.missingByproducts, ["Unknown Credit"]);
+});
+
 test("unanchored cycles terminate unresolved and anchored cycles terminate", () => {
   const { items } = normalizeData(objectData, defaultMapping);
   const unresolved = calculateEstimates(items, {}, null);

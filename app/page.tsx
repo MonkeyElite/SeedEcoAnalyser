@@ -216,7 +216,7 @@ function RecipeCard({
         <div className="recipe-result">Recipe estimate <strong>{estimateLabel({ ...calculation.result, candidates: [calculation.result] })}</strong></div>
       ) : null}
       {calculation?.missingByproducts.length ? (
-        <div className="recipe-warning provisional-copy">Excludes unresolved credit: {calculation.missingByproducts.join(", ")}</div>
+        <div className="recipe-warning provisional-copy">Provisional: assumes 0 sc credit for {calculation.missingByproducts.join(", ")}</div>
       ) : calculation && calculation.creditHigh !== 0 ? (
         <div className="credit-total">Credit applied: −{money(calculation.creditLow)}{calculation.creditHigh !== calculation.creditLow ? ` – ${money(calculation.creditHigh)}` : ""}</div>
       ) : null}
@@ -689,6 +689,27 @@ function CalculationRulesPage({ rules, hourlyRate, machineHourlyRate, onChange, 
     <section className="rules-section safeguards-section">
       <div className="rules-section-heading"><div><p className="eyebrow">Engine safeguards</p><h3>Fixed rules that prevent invented values</h3></div><span>Documented here, intentionally not editable</span></div>
       <div className="safeguard-grid"><article><strong>Exact prices win</strong><p>A user-entered price is always the propagation anchor for that item.</p></article><article><strong>Multiple unknowns stop</strong><p>A recipe with two or more unresolved ingredients is not allocated an invented split.</p></article><article><strong>Cycles terminate</strong><p>Provenance prevents infinite recursion. Unanchored cycles remain unestimable.</p></article><article><strong>Routes remain distinct</strong><p>Conflicting schematics are retained as alternatives; their endpoints create the displayed range.</p></article><article><strong>Seeds and wild resources start lines</strong><p>Farming seeds are terminal starts. Wild-harvestable resources are valid alternative starts.</p></article><article><strong>Invalid quantities are rejected</strong><p>Zero, negative, or non-finite quantities cannot create a valid normalized recipe.</p></article></div>
+    </section>
+
+    <section className="rules-section pricing-states-section">
+      <div className="rules-section-heading"><div><p className="eyebrow">Reading the results</p><h3>Item pricing states</h3></div><span>The badge describes how trustworthy and complete the displayed item value is</span></div>
+      <div className="provisional-explainer">
+        <div><span className="status status-provisional">Provisional</span><strong>What “unresolved by-product credit” means</strong></div>
+        <p>A recipe can create a secondary item whose expected sale value should reduce the main item’s production cost. If that by-product has no exact or estimated price, the calculator temporarily gives its credit a value of <b>0 sc</b>. The main item can still receive a price, but it is marked provisional until that missing credit becomes known.</p>
+        <p>For a forward production estimate, omitting the credit normally makes the displayed cost too high. For a backward-solved ingredient, it can make the displayed value too low. The warning follows the uncertainty through later recipes and names the unresolved by-product wherever possible.</p>
+      </div>
+      <div className="pricing-state-grid">
+        <article><span className="status status-fixed">Exact</span><strong>User-entered anchor</strong><p>You entered this item’s price directly. It overrides every calculated candidate for that item and lets the engine propagate values both forward to outputs and backward to ingredients.</p></article>
+        <article><span className="status status-estimated">Estimated</span><strong>Complete derived value</strong><p>The engine calculated this value from a recipe and all values needed by that calculation are available. It may come from ingredients moving forward or from a priced output moving backward.</p></article>
+        <article><span className="status status-provisional">Provisional</span><strong>Derived, with omitted credit</strong><p>A numerical value exists, but at least one by-product credit in this item’s dependency chain is still unknown and currently counted as 0 sc. Price the named by-product to complete the estimate.</p></article>
+        <article><span className="status status-credit">Net credit</span><strong>Negative derived cost</strong><p>Expected by-product value is greater than the recipe’s ingredients, labor, and machine cost. The negative value is retained because producing the main item creates more credited value than it consumes.</p></article>
+        <article><span className="status status-missing">Unresolved</span><strong>Can’t be estimated</strong><p>No defensible value can be calculated yet. Common causes are no exact price anywhere in the connected line, two or more unknown ingredients in one backward calculation, or an unanchored cycle.</p></article>
+      </div>
+      <div className="pricing-source-grid">
+        <article><strong>Produced at [station]</strong><p>A forward estimate: ingredient values plus labor and machine cost, minus expected by-product credits, divided by output quantity.</p></article>
+        <article><strong>Back-solved from [item]</strong><p>A backward estimate: a known output value is used to solve the recipe’s only unknown ingredient after removing all other known values.</p></article>
+        <article><strong>Price range</strong><p>A range is not a separate certainty state. It means multiple valid recipe candidates or propagated ranges exist; the interface keeps their lowest and highest endpoints instead of choosing one silently.</p></article>
+      </div>
     </section>
   </div>;
 }
@@ -1457,7 +1478,7 @@ export default function Home() {
                 {!selectedEstimate ? <p className="muted">Add an exact price somewhere in this connected line, or price every input of one recipe.</p> : (
                   <>
                     <p className="estimate-source">{selectedEstimate.label}</p>
-                    {selectedEstimate.provisional && <p className="provisional-note">Provisional — unresolved by-product credit: {selectedEstimate.missingByproducts.join(", ") || "upstream estimate"}.</p>}
+                    {selectedEstimate.provisional && <p className="provisional-note"><strong>Provisional price.</strong> {selectedEstimate.missingByproducts.length ? `The calculator currently assigns 0 sc of credit to ${selectedEstimate.missingByproducts.join(", ")} because no price is available for ${selectedEstimate.missingByproducts.length === 1 ? "that by-product" : "those by-products"}.` : "A value used earlier in this production chain omits an unresolved by-product credit."} The estimate updates automatically when the missing value becomes known.</p>}
                     {selectedEstimate.low < 0 && <p className="credit-note">By-product value exceeds material and labor cost, creating a net production credit.</p>}
                   </>
                 )}
