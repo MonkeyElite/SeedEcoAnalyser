@@ -71,9 +71,11 @@ same Ubuntu server as Docker. Every triggered pipeline:
 
 Create a Jenkins **Pipeline** or **Multibranch Pipeline** for this repository
 and select **Pipeline script from SCM** with `Jenkinsfile` as the script path.
-Give the Jenkins user access to Docker, then configure a GitHub webhook for
-automatic runs after pushes. The server needs Docker Engine and the Docker
-Compose plugin; Node.js is not required on the Jenkins host.
+Set the branch specifier to `*/main`. The pipeline polls that configured branch
+once every minute and starts a build only when its Git revision changes, so a
+GitHub webhook is optional. Give the Jenkins user access to Docker. The server
+needs Docker Engine and the Docker Compose plugin; Node.js is not required on
+the Jenkins host.
 
 If a deployment fails, Jenkins prints the current service status and the last
 150 application log lines. The previously running container is not replaced

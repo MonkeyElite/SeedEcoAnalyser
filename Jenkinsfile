@@ -8,6 +8,12 @@ pipeline {
         skipDefaultCheckout(true)
     }
 
+    triggers {
+        // Poll the configured main-branch SCM once per minute. Jenkins only
+        // starts a build when the repository revision has changed.
+        pollSCM('* * * * *')
+    }
+
     environment {
         COMPOSE_PROJECT_NAME = 'seed-eco-analyser'
         DOCKER_BUILDKIT = '1'
