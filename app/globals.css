@@ -30,11 +30,11 @@ body {
   font-family: var(--font-geist-sans), Arial, sans-serif;
 }
 
-/* Match the user's preferred 110% browser zoom on desktop by default. Keep
+/* Match the user's preferred 125% browser zoom on desktop by default. Keep
    compact layouts at their native scale so phones and narrow windows retain
    their available width. */
 @media (min-width: 936px) {
-  body { zoom: 1.1; }
+  body { zoom: 1.25; }
 }
 
 button, input, select, textarea { font: inherit; }
