@@ -31,7 +31,37 @@ docker compose up -d --build
 ```
 
 Docker replaces the old container. Browser-stored calculator settings are not
-inside the container and are therefore unaffected.
+inside the container and are therefore unaffected. Shared pricing save files
+live in the persistent `seed-eco-data` Docker volume and also survive rebuilds.
+
+## Backing up shared pricing saves
+
+The application stores its SQLite database in `/app/data` inside the named
+Docker volume. To create a consistent backup from the project directory:
+
+```bash
+docker compose stop line-value
+docker run --rm \
+  -v seed-eco-analyser_seed-eco-data:/data:ro \
+  -v "$PWD":/backup \
+  alpine tar czf /backup/seed-eco-data-backup.tgz -C /data .
+docker compose start line-value
+```
+
+To restore that backup, stop the service, clear the dedicated volume contents,
+extract the archive, and restart the service:
+
+```bash
+docker compose stop line-value
+docker run --rm \
+  -v seed-eco-analyser_seed-eco-data:/data \
+  -v "$PWD":/backup \
+  alpine sh -c 'rm -f /data/* && tar xzf /backup/seed-eco-data-backup.tgz -C /data'
+docker compose start line-value
+```
+
+The volume prefix follows `COMPOSE_PROJECT_NAME`; the supplied Jenkins pipeline
+uses `seed-eco-analyser`.
 
 ## Using a domain and HTTPS
 

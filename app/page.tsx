@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   calculateEstimates,
   defaultMapping,
@@ -26,14 +26,22 @@ import {
   sanitizeCalculationRules,
   type CalculationRules,
 } from "./lib/calculation-rules";
+import {
+  datasetFingerprint,
+  type PricingSaveRecord,
+  type PricingSaveSummary,
+  type PricingScenarioState,
+} from "./lib/pricing-saves";
 
 const DATA_URL = "/data/items.json";
 const DB_NAME = "production-line-calculator";
 const STORAGE_KEY = "production-line-settings-v1";
 const LINE_COLUMNS_STORAGE_KEY = "production-line-columns-v1";
+const SAVE_UI_STORAGE_KEY = "production-line-save-ui-v1";
 
 type SavedDataset = { rawText: string; mapping: SchemaMapping };
-type ViewMode = "graph" | "table" | "lines" | "rules";
+type ViewMode = "graph" | "table" | "lines" | "rules" | "compare";
+type SaveStatus = "unsaved" | "saving" | "saved" | "error";
 
 const mappingFields: Array<{ key: keyof SchemaMapping; label: string; hint: string }> = [
   { key: "itemsPath", label: "Items collection", hint: "Blank means document root" },
@@ -685,6 +693,119 @@ function CalculationRulesPage({ rules, hourlyRate, machineHourlyRate, onChange, 
   </div>;
 }
 
+function SaveLibraryModal({ saves, activeSaveId, compareSaveIds, fingerprint, busy, error, onClose, onCreate, onLoad, onDuplicate, onRename, onDelete, onToggleCompare, onOpenComparison }: {
+  saves: PricingSaveSummary[];
+  activeSaveId: string | null;
+  compareSaveIds: string[];
+  fingerprint: string;
+  busy: boolean;
+  error: string;
+  onClose: () => void;
+  onCreate: (name: string, description: string) => void;
+  onLoad: (save: PricingSaveSummary) => void;
+  onDuplicate: (save: PricingSaveSummary) => void;
+  onRename: (save: PricingSaveSummary) => void;
+  onDelete: (save: PricingSaveSummary) => void;
+  onToggleCompare: (id: string) => void;
+  onOpenComparison: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="save-modal" role="dialog" aria-modal="true" aria-labelledby="save-library-title">
+      <header className="modal-header"><div><p className="eyebrow">Shared server library</p><h2 id="save-library-title">Pricing save files</h2></div><button className="modal-close" type="button" onClick={onClose} aria-label="Close save library">×</button></header>
+      <div className="save-create-panel">
+        <div><strong>Create from the current scenario</strong><p>Prices, payouts, labor, machine, skill, calculation rules, and disabled lines will be shared globally.</p></div>
+        <label><span>Name</span><input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} placeholder="e.g. July balance pass" /></label>
+        <label><span>Description</span><input value={description} maxLength={500} onChange={(event) => setDescription(event.target.value)} placeholder="Optional context" /></label>
+        <button className="button button-primary" type="button" disabled={busy || !name.trim()} onClick={() => { onCreate(name, description); setName(""); setDescription(""); }}>Create save</button>
+      </div>
+      {error && <div className="save-modal-error" role="alert">{error}</div>}
+      <div className="save-list" aria-label="Global pricing saves">
+        {saves.map((save) => {
+          const compatible = save.datasetFingerprint === fingerprint;
+          return <article className={`${save.id === activeSaveId ? "is-active" : ""} ${compatible ? "" : "is-incompatible"}`} key={save.id}>
+            <label className="compare-check"><input type="checkbox" checked={compareSaveIds.includes(save.id)} disabled={!compatible} onChange={() => onToggleCompare(save.id)} /><span className="sr-only">Compare {save.name}</span></label>
+            <div className="save-list-copy"><div><strong>{save.name}</strong>{save.id === activeSaveId && <span>Active</span>}{!compatible && <span className="mismatch">Dataset mismatch</span>}</div><p>{save.description || "No description"}</p><small>Revision {save.revision} · {new Date(save.updatedAt).toLocaleString()}</small></div>
+            <div className="save-list-actions"><button type="button" disabled={!compatible || busy} onClick={() => onLoad(save)}>Load</button><button type="button" disabled={!compatible || busy} onClick={() => onDuplicate(save)}>Duplicate</button><button type="button" disabled={busy} onClick={() => onRename(save)}>Rename</button><button type="button" disabled={busy} onClick={() => onDelete(save)}>Delete</button></div>
+          </article>;
+        })}
+        {!saves.length && <div className="empty-save-list"><strong>No global saves yet</strong><span>Create the first pricing scenario above.</span></div>}
+      </div>
+      <footer className="save-modal-footer"><span>{compareSaveIds.length} compatible save{compareSaveIds.length === 1 ? "" : "s"} selected</span><button className="button button-dark" type="button" disabled={!compareSaveIds.length} onClick={onOpenComparison}>Compare selected saves</button></footer>
+    </section>
+  </div>;
+}
+
+type ComparisonControls = {
+  query: string;
+  status: "all" | "priced" | "complete" | "incomplete";
+  visibility: "active" | "disabled" | "all";
+  metric: "gross" | "net";
+  sort: "rate" | "profit" | "margin" | "output" | "time";
+  direction: "asc" | "desc";
+};
+
+function ComparisonRankingPanel({ save, items, skills, controls }: { save: PricingSaveRecord; items: Item[]; skills: Skill[]; controls: ComparisonControls }) {
+  const calculations = useMemo(() => calculateEstimates(items, save.state.fixedPrices, save.state.hourlyRate, save.state.skillLevels, save.state.machineHourlyRate, save.state.calculationRules), [items, save.state]);
+  const lines = useMemo(() => analyzeProductionLines(items, save.state.fixedPrices, save.state.hourlyRate, save.state.skillLevels, calculations.estimates, save.state.machineHourlyRate, skills, save.state.npcPayouts, save.state.calculationRules), [items, skills, save.state, calculations.estimates]);
+  const disabled = useMemo(() => new Set(save.state.disabledLineIds), [save.state.disabledLineIds]);
+  const rate = useCallback((line: ProductionLine) => controls.metric === "gross" ? line.maxGrossPerTotalHour : line.maxNetPerTotalHour, [controls.metric]);
+  const visible = useMemo(() => {
+    const query = controls.query.trim().toLowerCase();
+    const value = (line: ProductionLine): number | string => {
+      if (controls.sort === "output") return line.output;
+      if (controls.sort === "profit") return line.maxProfit ?? -Infinity;
+      if (controls.sort === "margin") return line.maxMargin ?? -Infinity;
+      if (controls.sort === "time") return line.max.productionSeconds;
+      return rate(line) ?? -Infinity;
+    };
+    return lines.filter((line) => {
+      if (query && !`${line.output} ${line.finalStation} ${line.skills.join(" ")} ${line.rawInputs.join(" ")}`.toLowerCase().includes(query)) return false;
+      if (controls.status === "priced" && line.salePrice === undefined) return false;
+      if (controls.status === "complete" && !line.complete) return false;
+      if (controls.status === "incomplete" && line.complete) return false;
+      if (controls.visibility === "active" && disabled.has(line.id)) return false;
+      if (controls.visibility === "disabled" && !disabled.has(line.id)) return false;
+      return true;
+    }).sort((a, b) => {
+      const left = value(a); const right = value(b);
+      const result = typeof left === "string" || typeof right === "string" ? String(left).localeCompare(String(right)) : left - right;
+      return controls.direction === "asc" ? result : -result;
+    });
+  }, [lines, controls, disabled, rate]);
+  const evaluated = useMemo(() => visible.filter((line) => line.complete && rate(line) !== undefined), [visible, rate]);
+  const benchmark = useMemo(() => median(evaluated.map((line) => rate(line)!)), [evaluated, rate]);
+  const best = evaluated[0] ? [...evaluated].sort((a, b) => rate(b)! - rate(a)!)[0] : undefined;
+  return <article className="comparison-panel">
+    <header><div><p className="eyebrow">Global pricing save</p><h3>{save.name}</h3><span>{save.description || "No description"}</span></div><div className="comparison-panel-stats"><span><b>{best?.output ?? "—"}</b>best line</span><span><b>{benchmark === undefined ? "—" : money(benchmark)}</b>median {controls.metric} sc/h</span><span><b>{visible.length}</b>visible lines</span></div></header>
+    <div className="comparison-assumptions"><span>Labor {save.state.hourlyRate === null ? "off" : `${money(save.state.hourlyRate)} sc/h`}</span><span>Machine {save.state.machineHourlyRate === null ? "off" : `${money(save.state.machineHourlyRate)} sc/h`}</span><span>{save.state.disabledLineIds.length} disabled</span><span>Revision {save.revision}</span></div>
+    <div className="comparison-table-wrap"><table><thead><tr><th>Production line</th><th>Station</th><th className="numeric">Steps</th><th className="numeric">Production time</th><th className="numeric">Cost / batch</th><th className="numeric">Revenue</th><th className="numeric">Net / batch</th><th className="numeric">Gross sc/h</th><th className="numeric">Net sc/h</th><th className="numeric">Margin</th><th className="numeric">vs median</th></tr></thead><tbody>{visible.map((line) => {
+      const currentRate = rate(line);
+      const difference = benchmark !== undefined && currentRate !== undefined && benchmark !== 0 ? (currentRate / benchmark - 1) * 100 : undefined;
+      return <tr className={disabled.has(line.id) ? "is-disabled" : ""} key={line.id}><td><strong>{line.output}</strong><small>{line.schematicId || line.id}</small></td><td>{line.finalStation}</td><td className="numeric">{line.min.steps.length}</td><td className="numeric">{compactTime(line.max.productionSeconds)}</td><td className="numeric">{numericRange(line.min.cost, line.max.cost)}</td><td className="numeric">{line.revenue === undefined ? "—" : money(line.revenue)}</td><td className="numeric">{numericRange(line.minProfit, line.maxProfit)}</td><td className="numeric">{numericRange(line.minGrossPerTotalHour, line.maxGrossPerTotalHour)}</td><td className="numeric">{numericRange(line.minNetPerTotalHour, line.maxNetPerTotalHour)}</td><td className="numeric">{numericRange(line.minMargin, line.maxMargin, "%")}</td><td className={`numeric ${difference !== undefined && difference > 0 ? "positive-value" : ""}`}>{difference === undefined ? "—" : `${difference > 0 ? "+" : ""}${money(difference)}%`}</td></tr>;
+    })}</tbody></table>{!visible.length && <div className="empty-line-results">No lines match the shared filters.</div>}</div>
+  </article>;
+}
+
+function ComparisonWorkspace({ saves, items, skills, summaries, selectedIds, fingerprint, onToggle, onMove, onOpenLibrary }: { saves: Record<string, PricingSaveRecord>; items: Item[]; skills: Skill[]; summaries: PricingSaveSummary[]; selectedIds: string[]; fingerprint: string; onToggle: (id: string) => void; onMove: (id: string, direction: -1 | 1) => void; onOpenLibrary: () => void }) {
+  const [controls, setControls] = useState<ComparisonControls>({ query: "", status: "all", visibility: "active", metric: "gross", sort: "rate", direction: "desc" });
+  const compatible = summaries.filter((save) => save.datasetFingerprint === fingerprint);
+  return <div className="comparison-workspace">
+    <header className="comparison-hero"><div><p className="eyebrow">Scenario laboratory</p><h2>Compare pricing saves</h2><p>Every panel recalculates the full production portfolio with that save’s own prices and assumptions.</p></div><button className="button button-primary" type="button" onClick={onOpenLibrary}>Choose save files</button></header>
+    <div className="comparison-picker" aria-label="Selected comparison saves">{compatible.map((save) => { const selected = selectedIds.includes(save.id); const index = selectedIds.indexOf(save.id); return <div className={selected ? "is-selected" : ""} key={save.id}><label><input type="checkbox" checked={selected} onChange={() => onToggle(save.id)} />{save.name}</label>{selected && <span><button type="button" disabled={index <= 0} onClick={() => onMove(save.id, -1)} aria-label={`Move ${save.name} left`}>←</button><button type="button" disabled={index === selectedIds.length - 1} onClick={() => onMove(save.id, 1)} aria-label={`Move ${save.name} right`}>→</button></span>}</div>; })}{!compatible.length && <span>No compatible global saves yet.</span>}</div>
+    <div className="comparison-toolbar">
+      <label className="line-search"><span>Search</span><input value={controls.query} onChange={(event) => setControls((current) => ({ ...current, query: event.target.value }))} placeholder="Outputs, stations, skills, inputs…" /></label>
+      <label><span>Availability</span><select value={controls.status} onChange={(event) => setControls((current) => ({ ...current, status: event.target.value as ComparisonControls["status"] }))}><option value="all">All lines</option><option value="priced">Priced outputs</option><option value="complete">Complete costs</option><option value="incomplete">Unresolved inputs</option></select></label>
+      <label><span>Visibility</span><select value={controls.visibility} onChange={(event) => setControls((current) => ({ ...current, visibility: event.target.value as ComparisonControls["visibility"] }))}><option value="active">Active lines</option><option value="disabled">Disabled only</option><option value="all">Active & disabled</option></select></label>
+      <label><span>Rate metric</span><select value={controls.metric} onChange={(event) => setControls((current) => ({ ...current, metric: event.target.value as ComparisonControls["metric"] }))}><option value="gross">Gross sc/hour</option><option value="net">Net sc/hour</option></select></label>
+      <label><span>Sort by</span><select value={controls.sort} onChange={(event) => setControls((current) => ({ ...current, sort: event.target.value as ComparisonControls["sort"] }))}><option value="rate">Selected rate</option><option value="profit">Net / batch</option><option value="margin">Margin</option><option value="time">Production time</option><option value="output">Output name</option></select></label>
+      <button type="button" onClick={() => setControls((current) => ({ ...current, direction: current.direction === "desc" ? "asc" : "desc" }))}>{controls.direction === "desc" ? "Highest first ↓" : "Lowest first ↑"}</button>
+    </div>
+    <div className="comparison-panels">{selectedIds.map((id) => saves[id] ? <ComparisonRankingPanel save={saves[id]} items={items} skills={skills} controls={controls} key={`${id}-${saves[id].revision}`} /> : <div className="comparison-loading" key={id}><span className="loader" />Loading save…</div>)}{!selectedIds.length && <div className="comparison-empty"><strong>Select at least one compatible save</strong><span>Use the picker above or open the save library.</span></div>}</div>
+  </div>;
+}
+
 export default function Home() {
   const [items, setItems] = useState<Item[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -712,6 +833,17 @@ export default function Home() {
   const [draftPreview, setDraftPreview] = useState<{ items: Item[]; warnings: string[] } | null>(null);
   const [importError, setImportError] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [showSaveLibrary, setShowSaveLibrary] = useState(false);
+  const [saveFiles, setSaveFiles] = useState<PricingSaveSummary[]>([]);
+  const [activeSaveId, setActiveSaveId] = useState<string | null>(null);
+  const [activeSaveRevision, setActiveSaveRevision] = useState(0);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("unsaved");
+  const [saveError, setSaveError] = useState("");
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [compareSaveIds, setCompareSaveIds] = useState<string[]>([]);
+  const [comparisonRecords, setComparisonRecords] = useState<Record<string, PricingSaveRecord>>({});
+  const lastSavedStateRef = useRef("");
+  const activeSaveIdRef = useRef<string | null>(null);
 
   const loadText = useCallback((text: string, preferredMapping?: SchemaMapping) => {
     const parsed = JSON.parse(text) as unknown;
@@ -734,16 +866,15 @@ export default function Home() {
       try {
         const savedSettings = localStorage.getItem(STORAGE_KEY);
         if (savedSettings) {
-          const parsed = JSON.parse(savedSettings) as { fixedPrices?: Record<string, number>; npcPayouts?: Record<string, number>; hourlyRate?: number | null; machineHourlyRate?: number | null; calculationRules?: Partial<CalculationRules>; skillLevels?: Record<string, number>; disabledLineIds?: string[]; depth?: number; viewMode?: ViewMode };
-          setFixedPrices(parsed.fixedPrices ?? {});
-          setNpcPayouts(parsed.npcPayouts ?? {});
-          setHourlyRate(parsed.hourlyRate ?? null);
-          setMachineHourlyRate(parsed.machineHourlyRate ?? null);
-          setCalculationRules(sanitizeCalculationRules(parsed.calculationRules));
-          setSkillLevels(parsed.skillLevels ?? {});
-          setDisabledLineIds(parsed.disabledLineIds ?? []);
+          const parsed = JSON.parse(savedSettings) as { depth?: number; viewMode?: ViewMode };
           setDepth(parsed.depth ?? 3);
           setViewMode(parsed.viewMode ?? "graph");
+        }
+        const savedUi = localStorage.getItem(SAVE_UI_STORAGE_KEY);
+        if (savedUi) {
+          const parsed = JSON.parse(savedUi) as { activeSaveId?: string | null; compareSaveIds?: string[] };
+          setActiveSaveId(typeof parsed.activeSaveId === "string" ? parsed.activeSaveId : null);
+          setCompareSaveIds(Array.isArray(parsed.compareSaveIds) ? parsed.compareSaveIds.filter((id): id is string => typeof id === "string") : []);
         }
         const savedDataset = await readSavedDataset();
         if (!active) return;
@@ -765,8 +896,14 @@ export default function Home() {
 
   useEffect(() => {
     if (!ready) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ fixedPrices, npcPayouts, hourlyRate, machineHourlyRate, calculationRules, skillLevels, disabledLineIds, depth, viewMode }));
-  }, [fixedPrices, npcPayouts, hourlyRate, machineHourlyRate, calculationRules, skillLevels, disabledLineIds, depth, viewMode, ready]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ depth, viewMode }));
+  }, [depth, viewMode, ready]);
+
+  useEffect(() => {
+    if (!ready) return;
+    localStorage.setItem(SAVE_UI_STORAGE_KEY, JSON.stringify({ activeSaveId, compareSaveIds }));
+    activeSaveIdRef.current = activeSaveId;
+  }, [activeSaveId, compareSaveIds, ready]);
 
   const itemsByName = useMemo(() => new Map(items.map((item) => [item.name, item])), [items]);
   const consumers = useMemo(() => {
@@ -778,6 +915,135 @@ export default function Home() {
     }
     return result;
   }, [items]);
+  const currentDatasetFingerprint = useMemo(() => items.length ? datasetFingerprint(items) : "", [items]);
+  const currentScenario = useMemo<PricingScenarioState>(() => ({
+    fixedPrices,
+    npcPayouts,
+    hourlyRate,
+    machineHourlyRate,
+    calculationRules,
+    skillLevels,
+    disabledLineIds,
+  }), [fixedPrices, npcPayouts, hourlyRate, machineHourlyRate, calculationRules, skillLevels, disabledLineIds]);
+  const currentScenarioJson = useMemo(() => JSON.stringify(currentScenario), [currentScenario]);
+
+  const applyPricingScenario = useCallback((state: PricingScenarioState) => {
+    setFixedPrices(state.fixedPrices);
+    setNpcPayouts(state.npcPayouts);
+    setHourlyRate(state.hourlyRate);
+    setMachineHourlyRate(state.machineHourlyRate);
+    setCalculationRules(sanitizeCalculationRules(state.calculationRules));
+    setSkillLevels(state.skillLevels);
+    setDisabledLineIds(state.disabledLineIds);
+  }, []);
+
+  const refreshSaveFiles = useCallback(async () => {
+    const response = await fetch("/api/pricing-saves", { cache: "no-store" });
+    const payload = await response.json() as { saves?: PricingSaveSummary[]; error?: string };
+    if (!response.ok) throw new Error(payload.error || "The global save library could not be loaded.");
+    setSaveFiles(payload.saves ?? []);
+    return payload.saves ?? [];
+  }, []);
+
+  const fetchPricingSave = useCallback(async (id: string): Promise<PricingSaveRecord> => {
+    const response = await fetch(`/api/pricing-saves/${encodeURIComponent(id)}`, { cache: "no-store" });
+    const payload = await response.json() as { save?: PricingSaveRecord; error?: string };
+    if (!response.ok || !payload.save) throw new Error(payload.error || "The pricing save could not be loaded.");
+    return payload.save;
+  }, []);
+
+  const loadPricingSave = useCallback(async (save: PricingSaveSummary | string, quiet = false) => {
+    const id = typeof save === "string" ? save : save.id;
+    try {
+      if (!quiet) setSaveBusy(true);
+      const record = await fetchPricingSave(id);
+      if (record.datasetFingerprint !== currentDatasetFingerprint) throw new Error(`Dataset mismatch: ${record.name} was created for ${record.datasetFingerprint}, while this browser has ${currentDatasetFingerprint}.`);
+      lastSavedStateRef.current = JSON.stringify(record.state);
+      applyPricingScenario(record.state);
+      activeSaveIdRef.current = record.id;
+      setActiveSaveId(record.id);
+      setActiveSaveRevision(record.revision);
+      setSaveStatus("saved");
+      setSaveError("");
+      setSaveFiles((current) => [record, ...current.filter((entry) => entry.id !== record.id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "The pricing save could not be loaded.");
+      setSaveStatus("error");
+    } finally {
+      if (!quiet) setSaveBusy(false);
+    }
+  }, [applyPricingScenario, currentDatasetFingerprint, fetchPricingSave]);
+
+  const persistActiveScenario = useCallback(async () => {
+    const id = activeSaveIdRef.current;
+    if (!id || !currentDatasetFingerprint) return;
+    const summary = saveFiles.find((save) => save.id === id);
+    if (summary && summary.datasetFingerprint !== currentDatasetFingerprint) return;
+    try {
+      setSaveStatus("saving");
+      const response = await fetch(`/api/pricing-saves/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ state: currentScenario }) });
+      const payload = await response.json() as { save?: PricingSaveRecord; error?: string };
+      if (!response.ok || !payload.save) throw new Error(payload.error || "Autosave failed.");
+      lastSavedStateRef.current = JSON.stringify(payload.save.state);
+      setActiveSaveRevision(payload.save.revision);
+      setSaveFiles((current) => [payload.save!, ...current.filter((entry) => entry.id !== id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+      setComparisonRecords((current) => current[id] ? { ...current, [id]: payload.save! } : current);
+      setSaveStatus("saved");
+      setSaveError("");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Autosave failed.";
+      setSaveError(message);
+      setSaveStatus("error");
+      if (/not found/i.test(message)) {
+        setActiveSaveId(null);
+        setActiveSaveRevision(0);
+        lastSavedStateRef.current = "";
+      }
+    }
+  }, [currentDatasetFingerprint, currentScenario, saveFiles]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const bootstrap = window.setTimeout(() => void refreshSaveFiles().catch((error) => setSaveError(error instanceof Error ? error.message : "The global save library could not be loaded.")), 0);
+    const timer = window.setInterval(() => void refreshSaveFiles().catch(() => undefined), 10_000);
+    const onFocus = () => void refreshSaveFiles().catch(() => undefined);
+    window.addEventListener("focus", onFocus);
+    return () => { window.clearTimeout(bootstrap); window.clearInterval(timer); window.removeEventListener("focus", onFocus); };
+  }, [ready, refreshSaveFiles]);
+
+  useEffect(() => {
+    if (!ready || !activeSaveId || !currentDatasetFingerprint) return;
+    const summary = saveFiles.find((save) => save.id === activeSaveId);
+    if (!summary) {
+      if (activeSaveRevision > 0) window.setTimeout(() => { activeSaveIdRef.current = null; setActiveSaveId(null); setActiveSaveRevision(0); setSaveStatus("unsaved"); setSaveError("The active save was deleted by another user. Your current values remain as an unsaved draft."); lastSavedStateRef.current = ""; }, 0);
+      return;
+    }
+    if (summary.datasetFingerprint !== currentDatasetFingerprint) {
+      window.setTimeout(() => { activeSaveIdRef.current = null; setActiveSaveId(null); setActiveSaveRevision(0); setSaveStatus("unsaved"); setSaveError("The dataset changed. Your values remain as an unsaved draft; create a new save for this dataset."); lastSavedStateRef.current = ""; }, 0);
+      return;
+    }
+    if (activeSaveRevision === 0 || (summary.revision > activeSaveRevision && saveStatus === "saved")) window.setTimeout(() => void loadPricingSave(summary.id, true), 0);
+  }, [ready, activeSaveId, activeSaveRevision, currentDatasetFingerprint, loadPricingSave, saveFiles, saveStatus]);
+
+  useEffect(() => {
+    if (!ready || !activeSaveId || !currentDatasetFingerprint || currentScenarioJson === lastSavedStateRef.current) return;
+    const dirtyTimer = window.setTimeout(() => setSaveStatus("unsaved"), 0);
+    const timer = window.setTimeout(() => void persistActiveScenario(), 750);
+    return () => { window.clearTimeout(dirtyTimer); window.clearTimeout(timer); };
+  }, [ready, activeSaveId, currentDatasetFingerprint, currentScenarioJson, persistActiveScenario]);
+
+  useEffect(() => {
+    if (!ready || !currentDatasetFingerprint) return;
+    const validIds = compareSaveIds.filter((id) => saveFiles.some((save) => save.id === id && save.datasetFingerprint === currentDatasetFingerprint));
+    if (validIds.length !== compareSaveIds.length) window.setTimeout(() => setCompareSaveIds(validIds), 0);
+    if (!validIds.length) { window.setTimeout(() => setComparisonRecords({}), 0); return; }
+    let active = true;
+    void Promise.all(validIds.map((id) => fetchPricingSave(id).catch(() => null))).then((records) => {
+      if (!active) return;
+      setComparisonRecords(Object.fromEntries(records.filter((record): record is PricingSaveRecord => Boolean(record) && record!.datasetFingerprint === currentDatasetFingerprint).map((record) => [record.id, record])));
+    });
+    return () => { active = false; };
+  }, [ready, currentDatasetFingerprint, compareSaveIds, saveFiles, fetchPricingSave]);
   const deferredFixedPrices = useDeferredValue(fixedPrices);
   const deferredNpcPayouts = useDeferredValue(npcPayouts);
   const deferredHourlyRate = useDeferredValue(hourlyRate);
@@ -831,6 +1097,103 @@ export default function Home() {
     setItemPrice(selectedName, value);
   }
 
+  async function createPricingSaveFromCurrent(name: string, description: string) {
+    try {
+      setSaveBusy(true);
+      setSaveError("");
+      const response = await fetch("/api/pricing-saves", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, description, datasetFingerprint: currentDatasetFingerprint, state: currentScenario }) });
+      const payload = await response.json() as { save?: PricingSaveRecord; error?: string };
+      if (!response.ok || !payload.save) throw new Error(payload.error || "The pricing save could not be created.");
+      lastSavedStateRef.current = JSON.stringify(payload.save.state);
+      activeSaveIdRef.current = payload.save.id;
+      setActiveSaveId(payload.save.id);
+      setActiveSaveRevision(payload.save.revision);
+      setSaveFiles((current) => [payload.save!, ...current.filter((save) => save.id !== payload.save!.id)]);
+      setSaveStatus("saved");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "The pricing save could not be created.");
+      setSaveStatus("error");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  async function duplicatePricingSave(save: PricingSaveSummary) {
+    const proposedName = window.prompt("Name for the duplicated pricing save", `${save.name} copy`);
+    if (!proposedName?.trim()) return;
+    try {
+      setSaveBusy(true);
+      const source = await fetchPricingSave(save.id);
+      const response = await fetch("/api/pricing-saves", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: proposedName, description: source.description, datasetFingerprint: source.datasetFingerprint, state: source.state }) });
+      const payload = await response.json() as { save?: PricingSaveRecord; error?: string };
+      if (!response.ok || !payload.save) throw new Error(payload.error || "The save could not be duplicated.");
+      setSaveFiles((current) => [payload.save!, ...current]);
+      setSaveError("");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "The save could not be duplicated.");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  async function renamePricingSave(save: PricingSaveSummary) {
+    const name = window.prompt("New pricing save name", save.name);
+    if (!name?.trim() || name.trim() === save.name) return;
+    try {
+      setSaveBusy(true);
+      const response = await fetch(`/api/pricing-saves/${encodeURIComponent(save.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+      const payload = await response.json() as { save?: PricingSaveRecord; error?: string };
+      if (!response.ok || !payload.save) throw new Error(payload.error || "The save could not be renamed.");
+      setSaveFiles((current) => current.map((entry) => entry.id === save.id ? payload.save! : entry));
+      setComparisonRecords((current) => current[save.id] ? { ...current, [save.id]: payload.save! } : current);
+      setActiveSaveRevision((current) => save.id === activeSaveId ? payload.save!.revision : current);
+      setSaveError("");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "The save could not be renamed.");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  async function deletePricingSaveFile(save: PricingSaveSummary) {
+    if (!window.confirm(`Delete the global pricing save “${save.name}”? This cannot be undone.`)) return;
+    try {
+      setSaveBusy(true);
+      const response = await fetch(`/api/pricing-saves/${encodeURIComponent(save.id)}`, { method: "DELETE" });
+      if (!response.ok && response.status !== 404) {
+        const payload = await response.json() as { error?: string };
+        throw new Error(payload.error || "The save could not be deleted.");
+      }
+      setSaveFiles((current) => current.filter((entry) => entry.id !== save.id));
+      setCompareSaveIds((current) => current.filter((id) => id !== save.id));
+      setComparisonRecords((current) => { const next = { ...current }; delete next[save.id]; return next; });
+      if (save.id === activeSaveId) {
+        activeSaveIdRef.current = null;
+        lastSavedStateRef.current = "";
+        setActiveSaveId(null);
+        setActiveSaveRevision(0);
+        setSaveStatus("unsaved");
+      }
+      setSaveError("");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "The save could not be deleted.");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  function toggleComparisonSave(id: string) {
+    setCompareSaveIds((current) => current.includes(id) ? current.filter((saveId) => saveId !== id) : [...current, id]);
+  }
+
+  function moveComparisonSave(id: string, direction: -1 | 1) {
+    setCompareSaveIds((current) => {
+      const index = current.indexOf(id); const destination = index + direction;
+      if (index < 0 || destination < 0 || destination >= current.length) return current;
+      const next = [...current]; [next[index], next[destination]] = [next[destination], next[index]]; return next;
+    });
+  }
+
   function inspectDraft(text = draftText) {
     try {
       const parsed = JSON.parse(text);
@@ -882,6 +1245,15 @@ export default function Home() {
   async function resetAll() {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(LINE_COLUMNS_STORAGE_KEY);
+    localStorage.removeItem(SAVE_UI_STORAGE_KEY);
+    activeSaveIdRef.current = null;
+    lastSavedStateRef.current = "";
+    setActiveSaveId(null);
+    setActiveSaveRevision(0);
+    setSaveStatus("unsaved");
+    setSaveError("");
+    setCompareSaveIds([]);
+    setComparisonRecords({});
     setFixedPrices({});
     setNpcPayouts({});
     setHourlyRate(null);
@@ -940,6 +1312,7 @@ export default function Home() {
           <span><strong>{estimatedCount}</strong> priced</span>
         </div>
         <div className="top-actions">
+          <button className={`button save-library-button save-${saveStatus}`} type="button" onClick={() => setShowSaveLibrary(true)}><span>{activeSaveId ? saveFiles.find((save) => save.id === activeSaveId)?.name ?? "Shared save" : "Unsaved pricing"}</span><small>{saveStatus === "saving" ? "Saving…" : saveStatus === "saved" ? "Saved globally" : saveStatus === "error" ? "Save needs attention" : "Create a save file"}</small></button>
           <button className="button button-quiet" type="button" onClick={reloadBundled}>Reload file</button>
           <button className="button button-skill" type="button" onClick={() => setShowSkills(true)}>Skills{activeSkillCount ? ` · ${activeSkillCount}` : ""}</button>
           <button className="button button-primary" type="button" onClick={openImporter}>Import & map JSON</button>
@@ -1001,11 +1374,13 @@ export default function Home() {
           <button className={viewMode === "graph" ? "active" : ""} onClick={() => setViewMode("graph")} type="button">Graph</button>
           <button className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")} type="button">Table</button>
           <button className={viewMode === "lines" ? "active" : ""} onClick={() => setViewMode("lines")} type="button">Line rankings</button>
+          <button className={viewMode === "compare" ? "active" : ""} onClick={() => setViewMode("compare")} type="button">Compare saves</button>
           <button className={viewMode === "rules" ? "active" : ""} onClick={() => setViewMode("rules")} type="button">Calculation rules</button>
         </div>
       </section>
 
       {loadError && <div className="notice notice-error" role="alert">{loadError}</div>}
+      {saveError && <div className="notice notice-error save-notice" role="alert"><span>{saveError}</span>{activeSaveId && saveStatus === "error" && <button type="button" onClick={() => void persistActiveScenario()}>Retry save</button>}<button type="button" onClick={() => setSaveError("")} aria-label="Dismiss save message">×</button></div>}
       {warnings.length > 0 && (
         <details className="notice notice-warning">
           <summary>{warnings.length} data note{warnings.length === 1 ? "" : "s"}</summary>
@@ -1013,12 +1388,14 @@ export default function Home() {
         </details>
       )}
 
-      <div className={`workspace-grid ${viewMode === "lines" || viewMode === "rules" ? "lines-mode" : ""}`}>
+      <div className={`workspace-grid ${viewMode === "lines" || viewMode === "rules" || viewMode === "compare" ? "lines-mode" : ""}`}>
         <section className="workspace-main" aria-label="Production line workspace">
           {!ready ? (
             <div className="empty-state"><span className="loader" /><h2>Reading production data</h2></div>
           ) : viewMode === "rules" ? (
             <CalculationRulesPage rules={calculationRules} hourlyRate={hourlyRate} machineHourlyRate={machineHourlyRate} onChange={updateCalculationRule} onReset={() => setCalculationRules(DEFAULT_CALCULATION_RULES)} />
+          ) : viewMode === "compare" ? (
+            <ComparisonWorkspace saves={comparisonRecords} items={items} skills={skills} summaries={saveFiles} selectedIds={compareSaveIds} fingerprint={currentDatasetFingerprint} onToggle={toggleComparisonSave} onMove={moveComparisonSave} onOpenLibrary={() => setShowSaveLibrary(true)} />
           ) : !itemsByName.has(focusName) ? (
             <div className="empty-state"><span className="empty-glyph">⌕</span><h2>Choose an item to trace its production line</h2><p>Use the focus search above to begin.</p></div>
           ) : viewMode === "lines" ? (
@@ -1059,7 +1436,7 @@ export default function Home() {
           )}
         </section>
 
-        {viewMode !== "lines" && viewMode !== "rules" && <aside className="inspector" aria-label="Item inspector">
+        {viewMode !== "lines" && viewMode !== "rules" && viewMode !== "compare" && <aside className="inspector" aria-label="Item inspector">
           {selectedItem ? (
             <>
               <div className="inspector-kicker"><span>Item inspector</span><StatusBadge estimate={selectedEstimate} /></div>
@@ -1103,9 +1480,11 @@ export default function Home() {
               </section>
             </>
           ) : <div className="empty-inspector">Select an item to inspect its price.</div>}
-          <div className="inspector-footer"><button type="button" onClick={resetAll}>Reset data & settings</button><span>Stored only on this device</span></div>
+          <div className="inspector-footer"><button type="button" onClick={resetAll}>Reset local workspace</button><span>{activeSaveId ? "Pricing autosaves globally" : "Unsaved draft"}</span></div>
         </aside>}
       </div>
+
+      {showSaveLibrary && <SaveLibraryModal saves={saveFiles} activeSaveId={activeSaveId} compareSaveIds={compareSaveIds} fingerprint={currentDatasetFingerprint} busy={saveBusy} error={saveError} onClose={() => setShowSaveLibrary(false)} onCreate={(name, description) => void createPricingSaveFromCurrent(name, description)} onLoad={(save) => void loadPricingSave(save)} onDuplicate={(save) => void duplicatePricingSave(save)} onRename={(save) => void renamePricingSave(save)} onDelete={(save) => void deletePricingSaveFile(save)} onToggleCompare={toggleComparisonSave} onOpenComparison={() => { setViewMode("compare"); setShowSaveLibrary(false); }} />}
 
       {showImporter && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setShowImporter(false); }}>

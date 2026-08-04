@@ -19,6 +19,7 @@ ENV NODE_ENV=production \
     PORT=3000
 
 COPY --from=build --chown=node:node /app/dist/standalone ./
+RUN mkdir -p /app/data && chown node:node /app/data
 
 USER node
 

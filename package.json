@@ -7,9 +7,9 @@
   },
   "scripts": {
     "dev": "vinext dev",
-    "build": "vinext build",
+    "build": "vinext build && node scripts/prepare-standalone.mjs",
     "start": "vinext start",
-    "test": "npm run build && node --experimental-strip-types --test tests/recipe-engine.test.ts tests/rendered-html.test.mjs",
+    "test": "npm run build && node --experimental-strip-types --test tests/recipe-engine.test.ts tests/pricing-saves.test.ts tests/rendered-html.test.mjs tests/standalone-server.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

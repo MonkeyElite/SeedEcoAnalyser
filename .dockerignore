@@ -8,5 +8,6 @@ dist
 npm-debug.log*
 tsconfig.tsbuildinfo
 coverage
+data
 outputs
 work
