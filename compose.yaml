@@ -1,0 +1,16 @@
+services:
+  line-value:
+    image: seed-eco-analyser:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: line-value
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+    security_opt:
+      - no-new-privileges:true

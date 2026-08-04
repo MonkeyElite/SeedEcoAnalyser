@@ -1,0 +1,80 @@
+# Deploying Line / Value with Docker
+
+The application has no server-side database. Its bundled recipe data is built
+into the image, while imported data, NPC payouts, skill levels, and display
+preferences remain in each visitor's browser storage.
+
+## Fastest deployment
+
+Install Docker Engine with the Docker Compose plugin on the server, copy this
+project to the server, and run from the project directory:
+
+```bash
+docker compose up -d --build
+```
+
+Open `http://SERVER_IP:3000` after the container becomes healthy.
+
+Check its status and logs with:
+
+```bash
+docker compose ps
+docker compose logs -f line-value
+```
+
+## Updating the application
+
+Copy or pull the updated project files, then rebuild in place:
+
+```bash
+docker compose up -d --build
+```
+
+Docker replaces the old container. Browser-stored calculator settings are not
+inside the container and are therefore unaffected.
+
+## Using a domain and HTTPS
+
+Keep port 3000 private and place an existing reverse proxy in front of it. For
+example, a minimal Caddy configuration is:
+
+```caddyfile
+calculator.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+After DNS points the domain to the server, Caddy obtains and renews HTTPS
+certificates automatically. If the reverse proxy itself runs in Docker, proxy
+to `line-value:3000` from a shared Docker network instead of `127.0.0.1`.
+
+## Changing the public port
+
+Change only the left side of the port mapping in `compose.yaml`:
+
+```yaml
+ports:
+  - "8080:3000"
+```
+
+The application then opens at `http://SERVER_IP:8080`.
+
+## Automatic deployment with Jenkins
+
+The repository includes a `Jenkinsfile` for a Jenkins agent running on the
+same Ubuntu server as Docker. Every triggered pipeline:
+
+1. checks out the requested Git commit;
+2. builds the Docker image, running lint, tests, and the production build;
+3. replaces the running Compose service only after the image succeeds; and
+4. waits for the container health check before marking the deployment green.
+
+Create a Jenkins **Pipeline** or **Multibranch Pipeline** for this repository
+and select **Pipeline script from SCM** with `Jenkinsfile` as the script path.
+Give the Jenkins user access to Docker, then configure a GitHub webhook for
+automatic runs after pushes. The server needs Docker Engine and the Docker
+Compose plugin; Node.js is not required on the Jenkins host.
+
+If a deployment fails, Jenkins prints the current service status and the last
+150 application log lines. The previously running container is not replaced
+when the image build or tests fail.
